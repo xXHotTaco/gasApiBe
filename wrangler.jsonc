@@ -13,6 +13,13 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "gas_app_db",
+			"database_id": "1cefe3dc-970f-437d-ad13-9a2ba23255aa"
+		}
 	]
 	/**
 	 * Smart Placement

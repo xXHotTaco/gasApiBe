@@ -10,7 +10,13 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.4",
+    "@types/bcryptjs": "^2.4.6",
     "vitest": "~3.2.0",
     "wrangler": "^4.97.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "hono": "^4.12.23",
+    "jose": "^6.2.3"
   }
 }

@@ -1,15 +1,425 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import bcrypt from "bcryptjs";
+import { SignJWT, jwtVerify } from "jose";
 
-export default {
-	async fetch(request, env, ctx) {
-		return new Response("Hello World!");
-	},
-};
+const app = new Hono();
+
+app.use(
+  "*",
+  cors({
+    origin: "*",
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+function jsonError(message, status = 400) {
+  return Response.json({ ok: false, error: message }, { status });
+}
+
+function createId(prefix) {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+
+async function createToken(userId, secret) {
+  const encodedSecret = new TextEncoder().encode(secret);
+
+  return await new SignJWT({ userId })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("30d")
+    .sign(encodedSecret);
+}
+
+async function getUserIdFromRequest(c) {
+  const authHeader = c.req.header("Authorization");
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authHeader.replace("Bearer ", "");
+  const encodedSecret = new TextEncoder().encode(c.env.JWT_SECRET);
+
+  try {
+    const { payload } = await jwtVerify(token, encodedSecret);
+    return payload.userId;
+  } catch {
+    return null;
+  }
+}
+
+app.use("/api/*", async (c, next) => {
+  const userId = await getUserIdFromRequest(c);
+
+  if (!userId) {
+    return jsonError("No autorizado", 401);
+  }
+
+  c.set("userId", userId);
+  await next();
+});
+
+app.get("/", (c) => {
+  return c.json({
+    ok: true,
+    name: "Gas API",
+    status: "running",
+  });
+});
+
+app.post("/auth/register", async (c) => {
+  const body = await c.req.json();
+
+  const name = body.name?.trim();
+  const email = body.email?.trim().toLowerCase();
+  const password = body.password;
+
+  if (!name || !email || !password) {
+    return jsonError("Nombre, email y password son obligatorios");
+  }
+
+  if (password.length < 6) {
+    return jsonError("El password debe tener mínimo 6 caracteres");
+  }
+
+  const existing = await c.env.DB.prepare(
+    "SELECT id FROM users WHERE email = ?"
+  )
+    .bind(email)
+    .first();
+
+  if (existing) {
+    return jsonError("Ese email ya está registrado", 409);
+  }
+
+  const id = createId("usr");
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  await c.env.DB.prepare(
+    `
+    INSERT INTO users (id, name, email, password_hash)
+    VALUES (?, ?, ?, ?)
+    `
+  )
+    .bind(id, name, email, passwordHash)
+    .run();
+
+  const token = await createToken(id, c.env.JWT_SECRET);
+
+  return c.json({
+    ok: true,
+    token,
+    user: {
+      id,
+      name,
+      email,
+    },
+  });
+});
+
+app.post("/auth/login", async (c) => {
+  const body = await c.req.json();
+
+  const email = body.email?.trim().toLowerCase();
+  const password = body.password;
+
+  if (!email || !password) {
+    return jsonError("Email y password son obligatorios");
+  }
+
+  const user = await c.env.DB.prepare(
+    `
+    SELECT id, name, email, password_hash
+    FROM users
+    WHERE email = ?
+    `
+  )
+    .bind(email)
+    .first();
+
+  if (!user) {
+    return jsonError("Credenciales incorrectas", 401);
+  }
+
+  const validPassword = await bcrypt.compare(password, user.password_hash);
+
+  if (!validPassword) {
+    return jsonError("Credenciales incorrectas", 401);
+  }
+
+  const token = await createToken(user.id, c.env.JWT_SECRET);
+
+  return c.json({
+    ok: true,
+    token,
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+    },
+  });
+});
+
+app.get("/api/me", async (c) => {
+  const userId = c.get("userId");
+
+  const user = await c.env.DB.prepare(
+    `
+    SELECT id, name, email, created_at
+    FROM users
+    WHERE id = ?
+    `
+  )
+    .bind(userId)
+    .first();
+
+  return c.json({
+    ok: true,
+    user,
+  });
+});
+
+app.post("/api/vehicles", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+
+  const name = body.name?.trim();
+
+  if (!name) {
+    return jsonError("El nombre del vehículo es obligatorio");
+  }
+
+  const id = createId("veh");
+
+  await c.env.DB.prepare(
+    `
+    INSERT INTO vehicles (id, user_id, name, tank_capacity_liters)
+    VALUES (?, ?, ?, ?)
+    `
+  )
+    .bind(id, userId, name, body.tank_capacity_liters ?? null)
+    .run();
+
+  return c.json({
+    ok: true,
+    vehicle: {
+      id,
+      name,
+      tank_capacity_liters: body.tank_capacity_liters ?? null,
+    },
+  });
+});
+
+app.get("/api/vehicles", async (c) => {
+  const userId = c.get("userId");
+
+  const vehicles = await c.env.DB.prepare(
+    `
+    SELECT id, name, tank_capacity_liters, created_at
+    FROM vehicles
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+    `
+  )
+    .bind(userId)
+    .all();
+
+  return c.json({
+    ok: true,
+    vehicles: vehicles.results,
+  });
+});
+
+app.post("/api/gas-records", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+
+  if (!body.fill_date || !body.liters || !body.price_per_liter) {
+    return jsonError("Fecha, litros y precio por litro son obligatorios");
+  }
+
+  const id = createId("gas");
+  const totalCost = Number(body.liters) * Number(body.price_per_liter);
+
+  await c.env.DB.prepare(
+    `
+    INSERT INTO gas_records (
+      id,
+      user_id,
+      vehicle_id,
+      fill_date,
+      odometer_km,
+      liters,
+      price_per_liter,
+      total_cost,
+      is_full_tank,
+      notes
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+  )
+    .bind(
+      id,
+      userId,
+      body.vehicle_id ?? null,
+      body.fill_date,
+      body.odometer_km ?? null,
+      body.liters,
+      body.price_per_liter,
+      totalCost,
+      body.is_full_tank === false ? 0 : 1,
+      body.notes ?? null
+    )
+    .run();
+
+  return c.json({
+    ok: true,
+    record: {
+      id,
+      vehicle_id: body.vehicle_id ?? null,
+      fill_date: body.fill_date,
+      odometer_km: body.odometer_km ?? null,
+      liters: body.liters,
+      price_per_liter: body.price_per_liter,
+      total_cost: totalCost,
+      is_full_tank: body.is_full_tank ?? true,
+      notes: body.notes ?? null,
+    },
+  });
+});
+
+app.get("/api/gas-records", async (c) => {
+  const userId = c.get("userId");
+
+  const records = await c.env.DB.prepare(
+    `
+    SELECT
+      gr.id,
+      gr.vehicle_id,
+      v.name AS vehicle_name,
+      gr.fill_date,
+      gr.odometer_km,
+      gr.liters,
+      gr.price_per_liter,
+      gr.total_cost,
+      gr.is_full_tank,
+      gr.notes,
+      gr.created_at
+    FROM gas_records gr
+    LEFT JOIN vehicles v ON v.id = gr.vehicle_id
+    WHERE gr.user_id = ?
+    ORDER BY gr.fill_date DESC, gr.created_at DESC
+    `
+  )
+    .bind(userId)
+    .all();
+
+  return c.json({
+    ok: true,
+    records: records.results,
+  });
+});
+
+app.get("/api/stats", async (c) => {
+  const userId = c.get("userId");
+
+  const summary = await c.env.DB.prepare(
+    `
+    SELECT
+      COUNT(*) AS total_records,
+      SUM(liters) AS total_liters,
+      SUM(total_cost) AS total_spent,
+      AVG(price_per_liter) AS avg_price_per_liter
+    FROM gas_records
+    WHERE user_id = ?
+    `
+  )
+    .bind(userId)
+    .first();
+
+  const monthly = await c.env.DB.prepare(
+    `
+    SELECT
+      substr(fill_date, 1, 7) AS month,
+      SUM(liters) AS liters,
+      SUM(total_cost) AS spent,
+      COUNT(*) AS records
+    FROM gas_records
+    WHERE user_id = ?
+    GROUP BY substr(fill_date, 1, 7)
+    ORDER BY month DESC
+    LIMIT 12
+    `
+  )
+    .bind(userId)
+    .all();
+
+  const efficiency = await c.env.DB.prepare(
+    `
+    SELECT
+      id,
+      fill_date,
+      odometer_km,
+      liters,
+      total_cost
+    FROM gas_records
+    WHERE user_id = ?
+      AND odometer_km IS NOT NULL
+      AND is_full_tank = 1
+    ORDER BY fill_date ASC
+    `
+  )
+    .bind(userId)
+    .all();
+
+  const rows = efficiency.results ?? [];
+
+  const calculatedEfficiency = rows
+    .map((record, index) => {
+      if (index === 0) return null;
+
+      const previous = rows[index - 1];
+      const kmDriven = record.odometer_km - previous.odometer_km;
+
+      if (kmDriven <= 0 || record.liters <= 0) return null;
+
+      return {
+        from_date: previous.fill_date,
+        to_date: record.fill_date,
+        km_driven: kmDriven,
+        liters: record.liters,
+        km_per_liter: kmDriven / record.liters,
+        cost_per_km: record.total_cost / kmDriven,
+      };
+    })
+    .filter(Boolean);
+
+  return c.json({
+    ok: true,
+    summary,
+    monthly: monthly.results,
+    efficiency: calculatedEfficiency,
+  });
+});
+
+app.delete("/api/gas-records/:id", async (c) => {
+  const userId = c.get("userId");
+  const id = c.req.param("id");
+
+  await c.env.DB.prepare(
+    `
+    DELETE FROM gas_records
+    WHERE id = ? AND user_id = ?
+    `
+  )
+    .bind(id, userId)
+    .run();
+
+  return c.json({
+    ok: true,
+  });
+});
+
+export default app;
