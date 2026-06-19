@@ -324,7 +324,7 @@ app.get("/api/gas-records", async (c) => {
 
 app.get("/api/stats", async (c) => {
   const userId = c.get("userId");
-
+  
   const summary = await c.env.DB.prepare(
     `
     SELECT
@@ -367,7 +367,6 @@ app.get("/api/stats", async (c) => {
     FROM gas_records
     WHERE user_id = ?
       AND odometer_km IS NOT NULL
-      AND is_full_tank = 1
     ORDER BY fill_date ASC
     `
   )
