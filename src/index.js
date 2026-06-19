@@ -22,6 +22,169 @@ function createId(prefix) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
+function toNumber(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeSummary(summary) {
+  return {
+    total_records: Number(summary?.total_records ?? 0),
+    total_liters: toNumber(summary?.total_liters) ?? 0,
+    total_spent: toNumber(summary?.total_spent) ?? 0,
+    avg_price_per_liter: toNumber(summary?.avg_price_per_liter) ?? 0,
+  };
+}
+
+function normalizeMonthlyRows(rows) {
+  return (rows ?? []).map((row) => ({
+    month: row.month,
+    liters: toNumber(row.liters) ?? 0,
+    spent: toNumber(row.spent) ?? 0,
+    records: Number(row.records ?? 0),
+  }));
+}
+
+function getVehicleName(record) {
+  if (record.vehicle_name) {
+    return record.vehicle_name;
+  }
+
+  return record.vehicle_id ? "Vehiculo eliminado" : "Sin vehiculo";
+}
+
+function buildVehicleStats(summaryRows, monthlyRows, efficiencyRows) {
+  const vehicles = new Map();
+
+  function getVehicleBucket(record) {
+    const key = record.vehicle_id ?? "__no_vehicle__";
+
+    if (!vehicles.has(key)) {
+      vehicles.set(key, {
+        vehicle_id: record.vehicle_id ?? null,
+        vehicle_name: getVehicleName(record),
+        summary: normalizeSummary(),
+        monthly: [],
+        efficiency: [],
+      });
+    }
+
+    return vehicles.get(key);
+  }
+
+  for (const row of summaryRows ?? []) {
+    const bucket = getVehicleBucket(row);
+    bucket.summary = normalizeSummary(row);
+  }
+
+  for (const row of monthlyRows ?? []) {
+    const bucket = getVehicleBucket(row);
+    bucket.monthly.push({
+      month: row.month,
+      liters: toNumber(row.liters) ?? 0,
+      spent: toNumber(row.spent) ?? 0,
+      records: Number(row.records ?? 0),
+    });
+  }
+
+  let currentVehicleKey = null;
+  let previousRecord = null;
+
+  for (const row of efficiencyRows ?? []) {
+    const vehicleKey = row.vehicle_id ?? "__no_vehicle__";
+    const bucket = getVehicleBucket(row);
+    const currentRecord = {
+      id: row.id,
+      fill_date: row.fill_date,
+      odometer_km: toNumber(row.odometer_km),
+      liters: toNumber(row.liters) ?? 0,
+      total_cost: toNumber(row.total_cost) ?? 0,
+    };
+
+    if (vehicleKey !== currentVehicleKey) {
+      currentVehicleKey = vehicleKey;
+      previousRecord = null;
+    }
+
+    if (previousRecord) {
+      const kmDriven = currentRecord.odometer_km - previousRecord.odometer_km;
+
+      if (kmDriven > 0 && currentRecord.liters > 0) {
+        bucket.efficiency.push({
+          from_date: previousRecord.fill_date,
+          to_date: currentRecord.fill_date,
+          km_driven: kmDriven,
+          liters: currentRecord.liters,
+          km_per_liter: kmDriven / currentRecord.liters,
+          cost_per_km: currentRecord.total_cost / kmDriven,
+        });
+      }
+    }
+
+    previousRecord = currentRecord;
+  }
+
+  return Array.from(vehicles.values());
+}
+
+function createVehicleStats(vehicleId, vehicleName) {
+  return {
+    vehicle_id: vehicleId ?? null,
+    vehicle_name: vehicleName ?? (vehicleId ? "Vehiculo eliminado" : "Sin vehiculo"),
+    summary: normalizeSummary(),
+    monthly: [],
+    efficiency: [],
+  };
+}
+
+function getVehicleFilterClause(vehicleId, columnName) {
+  return vehicleId ? ` AND ${columnName} = ?` : "";
+}
+
+function bindUserScope(statement, userId, vehicleId) {
+  if (vehicleId) {
+    return statement.bind(userId, vehicleId);
+  }
+
+  return statement.bind(userId);
+}
+
+async function getVehicleFilter(c, userId) {
+  const vehicleId = c.req.query("vehicle_id")?.trim();
+
+  if (!vehicleId) {
+    return {
+      vehicleId: null,
+      vehicleName: null,
+    };
+  }
+
+  const vehicle = await c.env.DB.prepare(
+    `
+    SELECT id, name
+    FROM vehicles
+    WHERE id = ? AND user_id = ?
+    `
+  )
+    .bind(vehicleId, userId)
+    .first();
+
+  if (!vehicle) {
+    return {
+      error: jsonError("Vehiculo no encontrado", 404),
+    };
+  }
+
+  return {
+    vehicleId: vehicle.id,
+    vehicleName: vehicle.name,
+  };
+}
+
 async function createToken(userId, secret) {
   const encodedSecret = new TextEncoder().encode(secret);
 
@@ -292,8 +455,14 @@ app.post("/api/gas-records", async (c) => {
 
 app.get("/api/gas-records", async (c) => {
   const userId = c.get("userId");
+  const vehicleFilter = await getVehicleFilter(c, userId);
 
-  const records = await c.env.DB.prepare(
+  if (vehicleFilter.error) {
+    return vehicleFilter.error;
+  }
+
+  const records = await bindUserScope(
+    c.env.DB.prepare(
     `
     SELECT
       gr.id,
@@ -308,24 +477,37 @@ app.get("/api/gas-records", async (c) => {
       gr.notes,
       gr.created_at
     FROM gas_records gr
-    LEFT JOIN vehicles v ON v.id = gr.vehicle_id
+    LEFT JOIN vehicles v ON v.id = gr.vehicle_id AND v.user_id = gr.user_id
     WHERE gr.user_id = ?
+    ${getVehicleFilterClause(vehicleFilter.vehicleId, "gr.vehicle_id")}
     ORDER BY gr.fill_date DESC, gr.created_at DESC
     `
+    ),
+    userId,
+    vehicleFilter.vehicleId
   )
-    .bind(userId)
     .all();
 
   return c.json({
     ok: true,
+    filter: {
+      vehicle_id: vehicleFilter.vehicleId,
+      vehicle_name: vehicleFilter.vehicleName,
+    },
     records: records.results,
   });
 });
 
 app.get("/api/stats", async (c) => {
   const userId = c.get("userId");
-  
-  const summary = await c.env.DB.prepare(
+  const vehicleFilter = await getVehicleFilter(c, userId);
+
+  if (vehicleFilter.error) {
+    return vehicleFilter.error;
+  }
+
+  const overallSummary = await bindUserScope(
+    c.env.DB.prepare(
     `
     SELECT
       COUNT(*) AS total_records,
@@ -334,12 +516,16 @@ app.get("/api/stats", async (c) => {
       AVG(price_per_liter) AS avg_price_per_liter
     FROM gas_records
     WHERE user_id = ?
+    ${getVehicleFilterClause(vehicleFilter.vehicleId, "vehicle_id")}
     `
+    ),
+    userId,
+    vehicleFilter.vehicleId
   )
-    .bind(userId)
     .first();
 
-  const monthly = await c.env.DB.prepare(
+  const overallMonthly = await bindUserScope(
+    c.env.DB.prepare(
     `
     SELECT
       substr(fill_date, 1, 7) AS month,
@@ -348,58 +534,121 @@ app.get("/api/stats", async (c) => {
       COUNT(*) AS records
     FROM gas_records
     WHERE user_id = ?
+    ${getVehicleFilterClause(vehicleFilter.vehicleId, "vehicle_id")}
     GROUP BY substr(fill_date, 1, 7)
     ORDER BY month DESC
     LIMIT 12
     `
+    ),
+    userId,
+    vehicleFilter.vehicleId
   )
-    .bind(userId)
     .all();
 
-  const efficiency = await c.env.DB.prepare(
+  const vehicleSummary = await bindUserScope(
+    c.env.DB.prepare(
     `
     SELECT
-      id,
-      fill_date,
-      odometer_km,
-      liters,
-      total_cost
-    FROM gas_records
-    WHERE user_id = ?
-      AND odometer_km IS NOT NULL
-    ORDER BY fill_date ASC
+      gr.vehicle_id,
+      v.name AS vehicle_name,
+      COUNT(*) AS total_records,
+      SUM(gr.liters) AS total_liters,
+      SUM(gr.total_cost) AS total_spent,
+      AVG(gr.price_per_liter) AS avg_price_per_liter,
+      MAX(gr.fill_date) AS last_fill_date
+    FROM gas_records gr
+    LEFT JOIN vehicles v ON v.id = gr.vehicle_id AND v.user_id = gr.user_id
+    WHERE gr.user_id = ?
+    ${getVehicleFilterClause(vehicleFilter.vehicleId, "gr.vehicle_id")}
+    GROUP BY gr.vehicle_id, v.name
+    ORDER BY last_fill_date DESC, vehicle_name ASC
     `
+    ),
+    userId,
+    vehicleFilter.vehicleId
   )
-    .bind(userId)
     .all();
 
-  const rows = efficiency.results ?? [];
+  const vehicleMonthly = await bindUserScope(
+    c.env.DB.prepare(
+    `
+    SELECT
+      gr.vehicle_id,
+      v.name AS vehicle_name,
+      substr(gr.fill_date, 1, 7) AS month,
+      SUM(gr.liters) AS liters,
+      SUM(gr.total_cost) AS spent,
+      COUNT(*) AS records
+    FROM gas_records gr
+    LEFT JOIN vehicles v ON v.id = gr.vehicle_id AND v.user_id = gr.user_id
+    WHERE gr.user_id = ?
+    ${getVehicleFilterClause(vehicleFilter.vehicleId, "gr.vehicle_id")}
+    GROUP BY gr.vehicle_id, v.name, substr(gr.fill_date, 1, 7)
+    ORDER BY month DESC
+    `
+    ),
+    userId,
+    vehicleFilter.vehicleId
+  )
+    .all();
 
-  const calculatedEfficiency = rows
-    .map((record, index) => {
-      if (index === 0) return null;
+  const vehicleEfficiency = await bindUserScope(
+    c.env.DB.prepare(
+    `
+    SELECT
+      gr.vehicle_id,
+      v.name AS vehicle_name,
+      gr.id,
+      gr.fill_date,
+      gr.odometer_km,
+      gr.liters,
+      gr.total_cost,
+      gr.created_at
+    FROM gas_records gr
+    LEFT JOIN vehicles v ON v.id = gr.vehicle_id AND v.user_id = gr.user_id
+    WHERE gr.user_id = ?
+      ${getVehicleFilterClause(vehicleFilter.vehicleId, "gr.vehicle_id")}
+      AND gr.odometer_km IS NOT NULL
+    ORDER BY COALESCE(gr.vehicle_id, ''), gr.fill_date ASC, gr.created_at ASC
+    `
+    ),
+    userId,
+    vehicleFilter.vehicleId
+  )
+    .all();
 
-      const previous = rows[index - 1];
-      const kmDriven = record.odometer_km - previous.odometer_km;
+  const vehicles = buildVehicleStats(
+    vehicleSummary.results,
+    vehicleMonthly.results,
+    vehicleEfficiency.results
+  );
 
-      if (kmDriven <= 0 || record.liters <= 0) return null;
+  if (vehicleFilter.vehicleId && vehicles.length === 0) {
+    vehicles.push(
+      createVehicleStats(vehicleFilter.vehicleId, vehicleFilter.vehicleName)
+    );
+  }
 
-      return {
-        from_date: previous.fill_date,
-        to_date: record.fill_date,
-        km_driven: kmDriven,
-        liters: record.liters,
-        km_per_liter: kmDriven / record.liters,
-        cost_per_km: record.total_cost / kmDriven,
-      };
-    })
-    .filter(Boolean);
+  const overallEfficiency = vehicles.flatMap((vehicle) =>
+    vehicle.efficiency.map((efficiency) => ({
+      vehicle_id: vehicle.vehicle_id,
+      vehicle_name: vehicle.vehicle_name,
+      ...efficiency,
+    }))
+  );
 
   return c.json({
     ok: true,
-    summary,
-    monthly: monthly.results,
-    efficiency: calculatedEfficiency,
+    filter: {
+      vehicle_id: vehicleFilter.vehicleId,
+      vehicle_name: vehicleFilter.vehicleName,
+    },
+    overall: {
+      summary: normalizeSummary(overallSummary),
+      monthly: normalizeMonthlyRows(overallMonthly.results),
+      efficiency: overallEfficiency,
+    },
+    vehicles,
   });
 });
 
