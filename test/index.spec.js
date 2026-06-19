@@ -2,13 +2,13 @@ import { SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
 import worker from "../src";
 
-const VEHICLES = [
+const VEHICLE_SEED = [
   { id: "veh_a", user_id: "usr_1", name: "Sentra" },
   { id: "veh_b", user_id: "usr_1", name: "Versa" },
   { id: "veh_empty", user_id: "usr_1", name: "Tsuru" },
 ];
 
-const GAS_RECORDS = [
+const GAS_RECORD_SEED = [
   {
     id: "gas_1",
     user_id: "usr_1",
@@ -63,24 +63,16 @@ const GAS_RECORDS = [
   },
 ];
 
-function getVehicleById(vehicleId, userId) {
-  return (
-    VEHICLES.find(
-      (vehicle) => vehicle.id === vehicleId && vehicle.user_id === userId
-    ) ?? null
-  );
-}
-
-function getScopedRecords(userId, vehicleId = null) {
-  return GAS_RECORDS.filter(
+function getScopedRecords(records, userId, vehicleId = null) {
+  return records.filter(
     (record) =>
       record.user_id === userId &&
       (vehicleId ? record.vehicle_id === vehicleId : true)
   );
 }
 
-function getVehicleName(vehicleId) {
-  return VEHICLES.find((vehicle) => vehicle.id === vehicleId)?.name ?? null;
+function getVehicleName(vehicles, vehicleId) {
+  return vehicles.find((vehicle) => vehicle.id === vehicleId)?.name ?? null;
 }
 
 function buildSummary(records) {
@@ -131,13 +123,13 @@ function buildMonthly(records) {
   );
 }
 
-function buildVehicleSummary(records) {
+function buildVehicleSummary(records, vehicles) {
   const vehicleMap = new Map();
 
   for (const record of records) {
     const current = vehicleMap.get(record.vehicle_id) ?? {
       vehicle_id: record.vehicle_id,
-      vehicle_name: getVehicleName(record.vehicle_id),
+      vehicle_name: getVehicleName(vehicles, record.vehicle_id),
       total_records: 0,
       total_liters: 0,
       total_spent: 0,
@@ -176,7 +168,7 @@ function buildVehicleSummary(records) {
     });
 }
 
-function buildVehicleMonthly(records) {
+function buildVehicleMonthly(records, vehicles) {
   const monthlyMap = new Map();
 
   for (const record of records) {
@@ -184,7 +176,7 @@ function buildVehicleMonthly(records) {
     const key = `${record.vehicle_id}:${month}`;
     const current = monthlyMap.get(key) ?? {
       vehicle_id: record.vehicle_id,
-      vehicle_name: getVehicleName(record.vehicle_id),
+      vehicle_name: getVehicleName(vehicles, record.vehicle_id),
       month,
       liters: 0,
       spent: 0,
@@ -206,7 +198,7 @@ function buildVehicleMonthly(records) {
   });
 }
 
-function buildVehicleEfficiency(records) {
+function buildVehicleEfficiency(records, vehicles) {
   return [...records]
     .filter((record) => record.odometer_km !== null)
     .sort((a, b) => {
@@ -222,7 +214,7 @@ function buildVehicleEfficiency(records) {
     })
     .map((record) => ({
       vehicle_id: record.vehicle_id,
-      vehicle_name: getVehicleName(record.vehicle_id),
+      vehicle_name: getVehicleName(vehicles, record.vehicle_id),
       id: record.id,
       fill_date: record.fill_date,
       odometer_km: record.odometer_km,
@@ -232,7 +224,7 @@ function buildVehicleEfficiency(records) {
     }));
 }
 
-function buildGasRecordsResponse(records) {
+function buildGasRecordsResponse(records, vehicles) {
   return [...records]
     .sort((a, b) => {
       if (a.fill_date !== b.fill_date) {
@@ -244,7 +236,7 @@ function buildGasRecordsResponse(records) {
     .map((record) => ({
       id: record.id,
       vehicle_id: record.vehicle_id,
-      vehicle_name: getVehicleName(record.vehicle_id),
+      vehicle_name: getVehicleName(vehicles, record.vehicle_id),
       fill_date: record.fill_date,
       odometer_km: record.odometer_km,
       liters: record.liters,
@@ -257,6 +249,9 @@ function buildGasRecordsResponse(records) {
 }
 
 function createMockDb() {
+  const vehicles = VEHICLE_SEED.map((vehicle) => ({ ...vehicle }));
+  const gasRecords = GAS_RECORD_SEED.map((record) => ({ ...record }));
+
   return {
     prepare(sql) {
       return {
@@ -265,7 +260,12 @@ function createMockDb() {
             first: async () => {
               if (sql.includes("FROM vehicles") && sql.includes("WHERE id = ? AND user_id = ?")) {
                 const [vehicleId, userId] = args;
-                return getVehicleById(vehicleId, userId);
+                return (
+                  vehicles.find(
+                    (vehicle) =>
+                      vehicle.id === vehicleId && vehicle.user_id === userId
+                  ) ?? null
+                );
               }
 
               if (
@@ -274,12 +274,31 @@ function createMockDb() {
                 !sql.includes("gr.vehicle_id")
               ) {
                 const [userId, vehicleId = null] = args;
-                return buildSummary(getScopedRecords(userId, vehicleId));
+                return buildSummary(getScopedRecords(gasRecords, userId, vehicleId));
               }
 
               throw new Error(`Unexpected first() query: ${sql}`);
             },
             all: async () => {
+              if (
+                sql.includes("FROM vehicles") &&
+                sql.includes("WHERE user_id = ?") &&
+                sql.includes("ORDER BY created_at DESC")
+              ) {
+                const [userId] = args;
+
+                return {
+                  results: vehicles
+                    .filter((vehicle) => vehicle.user_id === userId)
+                    .map((vehicle) => ({
+                      id: vehicle.id,
+                      name: vehicle.name,
+                      tank_capacity_liters: vehicle.tank_capacity_liters ?? null,
+                      created_at: vehicle.created_at ?? null,
+                    })),
+                };
+              }
+
               if (
                 sql.includes("SELECT") &&
                 sql.includes("FROM gas_records gr") &&
@@ -287,7 +306,10 @@ function createMockDb() {
               ) {
                 const [userId, vehicleId = null] = args;
                 return {
-                  results: buildGasRecordsResponse(getScopedRecords(userId, vehicleId)),
+                  results: buildGasRecordsResponse(
+                    getScopedRecords(gasRecords, userId, vehicleId),
+                    vehicles
+                  ),
                 };
               }
 
@@ -297,32 +319,98 @@ function createMockDb() {
               ) {
                 const [userId, vehicleId = null] = args;
                 return {
-                  results: buildMonthly(getScopedRecords(userId, vehicleId)),
+                  results: buildMonthly(getScopedRecords(gasRecords, userId, vehicleId)),
                 };
               }
 
               if (sql.includes("GROUP BY gr.vehicle_id, v.name, substr(gr.fill_date, 1, 7)")) {
                 const [userId, vehicleId = null] = args;
                 return {
-                  results: buildVehicleMonthly(getScopedRecords(userId, vehicleId)),
+                  results: buildVehicleMonthly(
+                    getScopedRecords(gasRecords, userId, vehicleId),
+                    vehicles
+                  ),
                 };
               }
 
               if (sql.includes("GROUP BY gr.vehicle_id, v.name")) {
                 const [userId, vehicleId = null] = args;
                 return {
-                  results: buildVehicleSummary(getScopedRecords(userId, vehicleId)),
+                  results: buildVehicleSummary(
+                    getScopedRecords(gasRecords, userId, vehicleId),
+                    vehicles
+                  ),
                 };
               }
 
               if (sql.includes("ORDER BY COALESCE(gr.vehicle_id, ''), gr.fill_date ASC")) {
                 const [userId, vehicleId = null] = args;
                 return {
-                  results: buildVehicleEfficiency(getScopedRecords(userId, vehicleId)),
+                  results: buildVehicleEfficiency(
+                    getScopedRecords(gasRecords, userId, vehicleId),
+                    vehicles
+                  ),
                 };
               }
 
               throw new Error(`Unexpected all() query: ${sql}`);
+            },
+            run: async () => {
+              if (
+                sql.includes("DELETE FROM gas_records") &&
+                sql.includes("WHERE user_id = ? AND vehicle_id = ?")
+              ) {
+                const [userId, vehicleId] = args;
+
+                for (let index = gasRecords.length - 1; index >= 0; index -= 1) {
+                  if (
+                    gasRecords[index].user_id === userId &&
+                    gasRecords[index].vehicle_id === vehicleId
+                  ) {
+                    gasRecords.splice(index, 1);
+                  }
+                }
+
+                return { success: true };
+              }
+
+              if (
+                sql.includes("DELETE FROM vehicles") &&
+                sql.includes("WHERE id = ? AND user_id = ?")
+              ) {
+                const [vehicleId, userId] = args;
+
+                for (let index = vehicles.length - 1; index >= 0; index -= 1) {
+                  if (
+                    vehicles[index].id === vehicleId &&
+                    vehicles[index].user_id === userId
+                  ) {
+                    vehicles.splice(index, 1);
+                  }
+                }
+
+                return { success: true };
+              }
+
+              if (
+                sql.includes("DELETE FROM gas_records") &&
+                sql.includes("WHERE id = ? AND user_id = ?")
+              ) {
+                const [recordId, userId] = args;
+
+                for (let index = gasRecords.length - 1; index >= 0; index -= 1) {
+                  if (
+                    gasRecords[index].id === recordId &&
+                    gasRecords[index].user_id === userId
+                  ) {
+                    gasRecords.splice(index, 1);
+                  }
+                }
+
+                return { success: true };
+              }
+
+              throw new Error(`Unexpected run() query: ${sql}`);
             },
           };
         },
@@ -642,6 +730,137 @@ describe("Gas API worker", () => {
         },
         monthly: [],
         efficiency: [],
+      },
+    ]);
+  });
+
+  it("deletes a vehicle and all of its gas records", async () => {
+    const token = await createAuthToken("usr_1", "test-secret");
+    const env = {
+      JWT_SECRET: "test-secret",
+      DB: createMockDb(),
+    };
+
+    const deleteResponse = await worker.fetch(
+      new Request("http://example.com/api/vehicles/veh_a", {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      env,
+      {}
+    );
+
+    expect(deleteResponse.status).toBe(200);
+    expect(await deleteResponse.json()).toEqual({
+      ok: true,
+      deleted_vehicle: {
+        id: "veh_a",
+        name: "Sentra",
+      },
+    });
+
+    const vehiclesResponse = await worker.fetch(
+      new Request("http://example.com/api/vehicles", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      env,
+      {}
+    );
+
+    expect(vehiclesResponse.status).toBe(200);
+    expect(await vehiclesResponse.json()).toEqual({
+      ok: true,
+      vehicles: [
+        {
+          id: "veh_b",
+          name: "Versa",
+          tank_capacity_liters: null,
+          created_at: null,
+        },
+        {
+          id: "veh_empty",
+          name: "Tsuru",
+          tank_capacity_liters: null,
+          created_at: null,
+        },
+      ],
+    });
+
+    const recordsResponse = await worker.fetch(
+      new Request("http://example.com/api/gas-records", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      env,
+      {}
+    );
+
+    expect(recordsResponse.status).toBe(200);
+
+    const recordsBody = await recordsResponse.json();
+    expect(recordsBody.records).toHaveLength(2);
+    expect(recordsBody.records.every((record) => record.vehicle_id !== "veh_a")).toBe(
+      true
+    );
+
+    const statsResponse = await worker.fetch(
+      new Request("http://example.com/api/stats", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      env,
+      {}
+    );
+
+    expect(statsResponse.status).toBe(200);
+
+    const statsBody = await statsResponse.json();
+    expect(statsBody.overall.summary).toEqual({
+      total_records: 2,
+      total_liters: 70,
+      total_spent: 1600,
+      avg_price_per_liter: 22.91666666665,
+    });
+    expect(statsBody.vehicles).toEqual([
+      {
+        vehicle_id: "veh_b",
+        vehicle_name: "Versa",
+        summary: {
+          total_records: 2,
+          total_liters: 70,
+          total_spent: 1600,
+          avg_price_per_liter: 22.91666666665,
+        },
+        monthly: [
+          {
+            month: "2026-06",
+            liters: 30,
+            spent: 700,
+            records: 1,
+          },
+          {
+            month: "2026-05",
+            liters: 40,
+            spent: 900,
+            records: 1,
+          },
+        ],
+        efficiency: [
+          {
+            from_date: "2026-05-03",
+            to_date: "2026-06-05",
+            km_driven: 480,
+            liters: 30,
+            km_per_liter: 16,
+            cost_per_km: 700 / 480,
+          },
+        ],
       },
     ]);
   });

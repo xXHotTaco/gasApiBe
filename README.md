@@ -143,6 +143,7 @@ Authorization: Bearer TU_TOKEN
 GET /api/me
 GET /api/vehicles
 POST /api/vehicles
+DELETE /api/vehicles/:id
 GET /api/gas-records
 POST /api/gas-records
 DELETE /api/gas-records/:id
@@ -163,6 +164,8 @@ Filtros opcionales:
 - `GET /api/stats?vehicle_id=veh_123`
 
 Si mandas `vehicle_id`, la respuesta se limita a ese carro.
+
+`DELETE /api/vehicles/:id` borra el carro del usuario autenticado y tambien elimina sus registros de carga.
 
 Respuesta esperada de `GET /api/stats`:
 
