@@ -157,6 +157,95 @@ Invoke-RestMethod `
   -Headers @{ Authorization = "Bearer $token" }
 ```
 
+Filtros opcionales:
+
+- `GET /api/gas-records?vehicle_id=veh_123`
+- `GET /api/stats?vehicle_id=veh_123`
+
+Si mandas `vehicle_id`, la respuesta se limita a ese carro.
+
+Respuesta esperada de `GET /api/stats`:
+
+```json
+{
+  "ok": true,
+  "filter": {
+    "vehicle_id": null,
+    "vehicle_name": null
+  },
+  "overall": {
+    "summary": {
+      "total_records": 8,
+      "total_liters": 312.5,
+      "total_spent": 7420.3,
+      "avg_price_per_liter": 23.74
+    },
+    "monthly": [
+      {
+        "month": "2026-06",
+        "liters": 92.1,
+        "spent": 2190.4,
+        "records": 2
+      }
+    ],
+    "efficiency": [
+      {
+        "vehicle_id": "veh_123",
+        "vehicle_name": "Sentra",
+        "from_date": "2026-05-01",
+        "to_date": "2026-05-15",
+        "km_driven": 420,
+        "liters": 35,
+        "km_per_liter": 12,
+        "cost_per_km": 1.97
+      }
+    ]
+  },
+  "vehicles": [
+    {
+      "vehicle_id": "veh_123",
+      "vehicle_name": "Sentra",
+      "summary": {
+        "total_records": 5,
+        "total_liters": 180,
+        "total_spent": 4250,
+        "avg_price_per_liter": 23.61
+      },
+      "monthly": [
+        {
+          "month": "2026-06",
+          "liters": 45,
+          "spent": 1080,
+          "records": 1
+        }
+      ],
+      "efficiency": [
+        {
+          "from_date": "2026-05-01",
+          "to_date": "2026-05-15",
+          "km_driven": 420,
+          "liters": 35,
+          "km_per_liter": 12,
+          "cost_per_km": 1.97
+        }
+      ]
+    }
+  ]
+}
+```
+
+`filter` indica si la consulta viene filtrada por carro.
+
+`overall` trae el acumulado de la consulta actual:
+
+- sin `vehicle_id`: trae el acumulado de todo el usuario
+- con `vehicle_id`: trae el acumulado solo de ese carro
+
+`vehicles` trae la informacion separada por carro:
+
+- sin `vehicle_id`: trae todos los carros con registros
+- con `vehicle_id`: trae solo el carro seleccionado
+
 ## Scripts
 
 ```powershell
