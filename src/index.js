@@ -153,6 +153,18 @@ function bindUserScope(statement, userId, vehicleId) {
   return statement.bind(userId);
 }
 
+async function getOwnedVehicle(db, vehicleId, userId) {
+  return await db.prepare(
+    `
+    SELECT id, name
+    FROM vehicles
+    WHERE id = ? AND user_id = ?
+    `
+  )
+    .bind(vehicleId, userId)
+    .first();
+}
+
 async function getVehicleFilter(c, userId) {
   const vehicleId = c.req.query("vehicle_id")?.trim();
 
@@ -163,15 +175,7 @@ async function getVehicleFilter(c, userId) {
     };
   }
 
-  const vehicle = await c.env.DB.prepare(
-    `
-    SELECT id, name
-    FROM vehicles
-    WHERE id = ? AND user_id = ?
-    `
-  )
-    .bind(vehicleId, userId)
-    .first();
+  const vehicle = await getOwnedVehicle(c.env.DB, vehicleId, userId);
 
   if (!vehicle) {
     return {
@@ -392,6 +396,43 @@ app.get("/api/vehicles", async (c) => {
   return c.json({
     ok: true,
     vehicles: vehicles.results,
+  });
+});
+
+app.delete("/api/vehicles/:id", async (c) => {
+  const userId = c.get("userId");
+  const id = c.req.param("id");
+
+  const vehicle = await getOwnedVehicle(c.env.DB, id, userId);
+
+  if (!vehicle) {
+    return jsonError("Vehiculo no encontrado", 404);
+  }
+
+  await c.env.DB.prepare(
+    `
+    DELETE FROM gas_records
+    WHERE user_id = ? AND vehicle_id = ?
+    `
+  )
+    .bind(userId, id)
+    .run();
+
+  await c.env.DB.prepare(
+    `
+    DELETE FROM vehicles
+    WHERE id = ? AND user_id = ?
+    `
+  )
+    .bind(id, userId)
+    .run();
+
+  return c.json({
+    ok: true,
+    deleted_vehicle: {
+      id: vehicle.id,
+      name: vehicle.name,
+    },
   });
 });
 
